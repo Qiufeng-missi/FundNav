@@ -33,6 +33,17 @@ function isAum(tok) {
   return tok.includes('亿') || tok.includes('未');
 }
 
+// 从基金名后缀（如「·1000指增」）反推分类，作为分类上下文丢失时的兜底
+function catFromName(name) {
+  const SUF = {
+    '1000指增': '量化1000指增', '500指增': '量化500指增', '300指增': '量化300指增',
+    '对冲': '量化对冲', '选股': '量化选股', '全天候': '全天候',
+  };
+  if (!name || !name.includes('·')) return null;
+  const m = name.match(/·(1000指增|500指增|300指增|对冲|选股|全天候)/);
+  return m ? SUF[m[1]] : null;
+}
+
 function pct(s) {
   if (!s) return null;
   let t = s.replace('%', '').replace('+', '').trim();
@@ -62,8 +73,10 @@ async function extractPdf(arrayBuffer, filename) {
   const fullText = [];
 
   // 分类头（「XXX | 本周收益」）只在每个板块的首页出现，后续页是续页：
-  // curCat 必须跨页保持，否则溢出到续页的基金行会被整页跳过（表尾空值的根因）。
-  // 分界信号：遇到新板块扉页（业绩周刊/报告期）或板块末尾的「平均值」汇总行时清空 curCat。
+  // curCat 跨页保持；遇到新板块扉页（业绩周刊/报告期）才清空。
+  // 注意：「平均值」汇总行是板块内部的子标题（如百亿/中小规模平均），不能清空 curCat，
+  // 否则它后面的基金整段被跳过 —— 这正是 1000指增 等大板块表尾出现空值的根因。
+  // 兜底：基金名自带「·1000指增」等后缀，即使分类上下文丢失也能反推归位（见 catFromName）。
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const tc = await page.getTextContent();
@@ -74,14 +87,14 @@ async function extractPdf(arrayBuffer, filename) {
         const mp = line.match(/(\d{1,2})\.(\d{1,2})\s*-\s*(\d{1,2})\.(\d{2})/);
         if (mp) period = mp[1] + '.' + mp[2] + '-' + mp[3] + '.' + mp[4];
       }
-      if (/业绩周刊|报告期/.test(line) || line.indexOf('平均值') !== -1) curCat = null;
+      if (/业绩周刊|报告期/.test(line)) curCat = null;
       const mc = line.match(/(量化\d+指增|量化对冲|量化选股|全天候)\s*\|\s*本周收益/);
       if (mc) {
         curCat = mc[1];
         cats[curCat] = cats[curCat] || {};
         continue;
       }
-      if (curCat === null) continue;
+      if (curCat === null && !line.includes('·')) continue;
 
       const toks = line.split(/\s+/).filter(Boolean);
       let left, right;
@@ -90,13 +103,19 @@ async function extractPdf(arrayBuffer, filename) {
       else if (toks.length === 4) { left = toks.slice(0, 4); right = []; }
       else continue;
 
-      if (left.length >= 3 && isAum(left[1]) && left[0].includes('·')) {
-        const d = cats[curCat][left[0]] = cats[curCat][left[0]] || {};
+      const catL = (left.length >= 3 && left[0].includes('·') && isAum(left[1])) ? (curCat || catFromName(left[0])) : null;
+      const catR = (right.length >= 3 && right[0].includes('·') && isAum(right[1])) ? (curCat || catFromName(right[0])) : null;
+      if (!catL && !catR) continue;
+
+      if (catL) {
+        cats[catL] = cats[catL] || {};
+        const d = cats[catL][left[0]] = cats[catL][left[0]] || {};
         const p1 = pct(left[2]); if (p1 !== null) d['当周'] = p1;
         if (left.length > 3) { const e = pct(left[3]); if (e !== null) d['当周超额'] = e; }
       }
-      if (right.length >= 3 && isAum(right[1]) && right[0].includes('·')) {
-        const d = cats[curCat][right[0]] = cats[curCat][right[0]] || {};
+      if (catR) {
+        cats[catR] = cats[catR] || {};
+        const d = cats[catR][right[0]] = cats[catR][right[0]] || {};
         const p2 = pct(right[2]); if (p2 !== null) d['今年'] = p2;
         if (right.length > 3) { const e2 = pct(right[3]); if (e2 !== null) d['今年超额'] = e2; }
       }
