@@ -61,17 +61,20 @@ async function extractPdf(arrayBuffer, filename) {
   let curCat = null;
   const fullText = [];
 
+  // 分类头（「XXX | 本周收益」）只在每个板块的首页出现，后续页是续页：
+  // curCat 必须跨页保持，否则溢出到续页的基金行会被整页跳过（表尾空值的根因）。
+  // 分界信号：遇到新板块扉页（业绩周刊/报告期）或板块末尾的「平均值」汇总行时清空 curCat。
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const tc = await page.getTextContent();
     const lines = groupLines(tc);
-    curCat = null; // 每页重置：仅含「| 本周收益」的页才解析基金行
     for (const line of lines) {
       fullText.push(line);
       if (period === null) {
         const mp = line.match(/(\d{1,2})\.(\d{1,2})\s*-\s*(\d{1,2})\.(\d{2})/);
         if (mp) period = mp[1] + '.' + mp[2] + '-' + mp[3] + '.' + mp[4];
       }
+      if (/业绩周刊|报告期/.test(line) || line.indexOf('平均值') !== -1) curCat = null;
       const mc = line.match(/(量化\d+指增|量化对冲|量化选股|全天候)\s*\|\s*本周收益/);
       if (mc) {
         curCat = mc[1];
@@ -185,7 +188,7 @@ function colorFont(v) {
   return n >= 0 ? { color: { rgb: 'E23C39' } } : { color: { rgb: '16A34A' } };
 }
 
-function exportExcel(data) {
+function buildWorkbook(data) {
   const { weeks, categories, report_period, week_label } = data;
   const wb = XLSX.utils.book_new();
 
@@ -252,13 +255,158 @@ function exportExcel(data) {
     XLSX.utils.book_append_sheet(wb, ws, safe);
   });
 
-  const fname = '基金净值统计_' + (week_label || 'export') + '.xlsx';
-  if (window.Android && window.Android.saveFile) {
-    const out = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
-    window.Android.saveFile(fname, out, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  } else {
-    XLSX.writeFile(wb, fname);
+  return wb;
+}
+
+/* ===================== 走势图导出（PNG） ===================== */
+var PNG_SCALE = 1.5;
+
+function lastVal(series) {
+  for (let i = series.length - 1; i >= 0; i--) { if (series[i] !== null) return series[i]; }
+  return null;
+}
+
+function chartLegendRows(cat) {
+  const topN = Math.min(10, cat.funds.length);
+  const idxPresent = normalize(cat.benchmark_series || []).some(v => v !== null);
+  return Math.ceil((topN + (idxPresent ? 1 : 0)) / 2);
+}
+
+function chartBlockHeight(cat, weeks) {
+  const topN = Math.min(10, cat.funds.length);
+  const chartH = weeks.length === 1 ? (24 + topN * 34 + 40) : 520;
+  return 44 + chartH + 14 + chartLegendRows(cat) * 24 + 26;
+}
+
+function drawLinesCanvas(ctx, weeks, cat, top10, oy) {
+  const W = 940, H = 520, m = { t: 24, r: 24, b: 46, l: 54 };
+  const pw = W - m.l - m.r, ph = H - m.t - m.b;
+  const idxSeries = normalize(cat.benchmark_series || []);
+  const fundSeries = top10.map(f => normalize(f.cum));
+  const all = [];
+  fundSeries.forEach(s => s.forEach(v => { if (v !== null) all.push(v); }));
+  idxSeries.forEach(v => { if (v !== null) all.push(v); });
+  if (!all.length) all.push(0, 1);
+  let ymin = Math.min.apply(null, all), ymax = Math.max.apply(null, all);
+  const pad = (ymax - ymin) * 0.1 || 0.1; ymin -= pad; ymax += pad;
+  const x = i => m.l + (weeks.length === 1 ? 0 : (i / (weeks.length - 1)) * pw);
+  const y = v => oy + m.t + ph - ((v - ymin) / (ymax - ymin)) * ph;
+
+  ctx.font = '11px sans-serif'; ctx.textAlign = 'right';
+  for (let k = 0; k <= 5; k++) {
+    const v = ymin + (ymax - ymin) * k / 5, yy = y(v);
+    ctx.strokeStyle = '#eef0f3'; ctx.beginPath(); ctx.moveTo(m.l, yy); ctx.lineTo(W - m.r, yy); ctx.stroke();
+    ctx.fillStyle = '#6b7280'; ctx.fillText(v.toFixed(2), m.l - 8, yy + 4);
   }
+  ctx.textAlign = 'center'; ctx.fillStyle = '#6b7280';
+  weeks.forEach((d, i) => { ctx.fillText(d.slice(5), x(i), oy + H - m.b + 20); });
+  ctx.strokeStyle = '#cbd5e1';
+  ctx.beginPath(); ctx.moveTo(m.l, oy + m.t); ctx.lineTo(m.l, oy + m.t + ph); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(m.l, oy + m.t + ph); ctx.lineTo(W - m.r, oy + m.t + ph); ctx.stroke();
+
+  const path = series => {
+    ctx.beginPath(); let started = false;
+    series.forEach((v, i) => {
+      if (v === null) { started = false; return; }
+      const xx = x(i), yy = y(v);
+      if (!started) { ctx.moveTo(xx, yy); started = true; } else ctx.lineTo(xx, yy);
+    });
+    ctx.stroke();
+  };
+  if (idxSeries.some(v => v !== null)) {
+    ctx.strokeStyle = '#111827'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+    path(idxSeries); ctx.setLineDash([]); ctx.lineWidth = 1;
+  }
+  top10.forEach((f, fi) => {
+    ctx.strokeStyle = f._c; ctx.lineWidth = 2.2; path(fundSeries[fi]); ctx.lineWidth = 1;
+    fundSeries[fi].forEach((v, i) => {
+      if (v === null) return;
+      ctx.fillStyle = f._c; ctx.beginPath(); ctx.arc(x(i), y(v), 3, 0, Math.PI * 2); ctx.fill();
+    });
+  });
+  ctx.fillStyle = '#374151'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('周度日期', m.l + pw / 2, oy + H - 6);
+  ctx.save(); ctx.translate(14, oy + m.t + ph / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillText('累计收益(%)', 0, 0); ctx.restore();
+  ctx.textAlign = 'left';
+}
+
+function drawBarsCanvas(ctx, cat, top10, oy) {
+  const W = 940, rowH = 34, barH = 18, m = { l: 160, r: 90, t: 24, b: 30 };
+  const totalH = m.t + top10.length * rowH + 40;
+  const pw = W - m.l - m.r;
+  const idxSeries = normalize(cat.benchmark_series || []);
+  const vals = top10.map(f => (f.cum[0] != null ? f.cum[0] : 0));
+  const maxV = Math.max.apply(null, vals.concat(idxSeries.filter(v => v !== null), [0.0001]));
+  const x = v => m.l + (v / maxV) * pw;
+
+  ctx.font = '12px sans-serif'; ctx.textAlign = 'right';
+  top10.forEach((f, i) => {
+    const yc = oy + m.t + i * rowH + rowH / 2;
+    const v = f.cum[0];
+    ctx.fillStyle = '#374151'; ctx.fillText(f.name, m.l - 8, yc + 4);
+    if (v != null) {
+      const bw = Math.max(2, x(v) - m.l);
+      ctx.fillStyle = f._c; ctx.fillRect(m.l, yc - barH / 2, bw, barH);
+      ctx.textAlign = 'left'; ctx.fillText((v >= 0 ? '+' : '') + v.toFixed(2) + '%', m.l + bw + 6, yc + 4);
+      ctx.textAlign = 'right';
+    }
+  });
+  const bv = idxSeries[0];
+  if (bv != null) {
+    const bx = x(bv);
+    ctx.strokeStyle = '#111827'; ctx.setLineDash([6, 4]);
+    ctx.beginPath(); ctx.moveTo(bx, oy + m.t); ctx.lineTo(bx, oy + m.t + top10.length * rowH); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#111827'; ctx.textAlign = 'center';
+    ctx.fillText(cat.benchmark + ' ' + (bv >= 0 ? '+' : '') + bv.toFixed(2) + '%', bx, oy + m.t - 8);
+  }
+  ctx.textAlign = 'left';
+  return totalH;
+}
+
+function drawCatChartCanvas(ctx, cat, weeks, oy) {
+  const top10 = cat.funds.slice(0, 10);
+  top10.forEach((f, i) => { f._c = PALETTE[i % PALETTE.length]; });
+  ctx.fillStyle = '#111827'; ctx.font = 'bold 18px sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText('累计收益走势图 · ' + cat.key + '（对标指数：' + cat.benchmark + '）', 24, oy + 30);
+  const chartTop = oy + 44;
+  const chartH = weeks.length === 1 ? drawBarsCanvas(ctx, cat, top10, chartTop) : (drawLinesCanvas(ctx, weeks, cat, top10, chartTop), 520);
+  const ly = chartTop + chartH + 14;
+  const entries = top10.map(f => ({ color: f._c, name: f.name, v: lastVal(f.cum) }));
+  const idxSeries = normalize(cat.benchmark_series || []);
+  if (idxSeries.some(v => v !== null)) entries.push({ dash: true, name: cat.benchmark, v: lastVal(cat.benchmark_series) });
+  ctx.font = '13px sans-serif';
+  entries.forEach((e, i) => {
+    const ex = 24 + (i % 2) * 460, ey = ly + Math.floor(i / 2) * 24;
+    if (e.dash) {
+      ctx.strokeStyle = '#111827'; ctx.setLineDash([4, 3]);
+      ctx.beginPath(); ctx.moveTo(ex, ey - 4); ctx.lineTo(ex + 16, ey - 4); ctx.stroke(); ctx.setLineDash([]);
+    } else {
+      ctx.fillStyle = e.color; ctx.fillRect(ex, ey - 11, 12, 12);
+    }
+    ctx.fillStyle = '#374151';
+    ctx.fillText(e.name + '  ' + (e.v == null ? '-' : (e.v >= 0 ? '+' : '') + e.v.toFixed(2) + '%'), ex + 20, ey);
+  });
+}
+
+function chartsPngBase64(data) {
+  if (!data.categories.length) throw new Error('暂无数据');
+  const W = 940, headH = 96;
+  const H = headH + data.categories.reduce((s, c) => s + chartBlockHeight(c, data.weeks), 0) + 16;
+  const cv = document.createElement('canvas');
+  cv.width = Math.round(W * PNG_SCALE);
+  cv.height = Math.round(H * PNG_SCALE);
+  const ctx = cv.getContext('2d');
+  ctx.scale(PNG_SCALE, PNG_SCALE);
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#111827'; ctx.font = 'bold 26px sans-serif';
+  ctx.fillText('基金净值 · 累计收益走势图', 24, 44);
+  ctx.fillStyle = '#6b7280'; ctx.font = '14px sans-serif';
+  ctx.fillText('报告期 ' + (data.report_period || '-') + ' · 共 ' + data.weeks.length + ' 周 · 生成于 ' + new Date().toLocaleString('zh-CN'), 24, 74);
+  let oy = headH;
+  data.categories.forEach(c => { drawCatChartCanvas(ctx, c, data.weeks, oy); oy += chartBlockHeight(c, data.weeks); });
+  return cv.toDataURL('image/png').split(',')[1];
 }
 
 /* ===================== main.js ===================== */
@@ -504,10 +652,49 @@ document.addEventListener('drop', e => {
   if (f && /\.pdf$/i.test(f.name)) handleFile(f);
 });
 
+function base64ToBlob(b64, mime) {
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], { type: mime });
+}
+
+function downloadFile(f) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(base64ToBlob(f.base64, f.mime));
+  a.download = f.name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 800);
+}
+
 document.getElementById('exportBtn').onclick = () => {
   if (!DATA || !DATA.weeks.length) { setStatus('暂无数据可导出', 'err'); return; }
-  try { exportExcel(DATA); setStatus('已生成 Excel 文件', 'ok'); }
-  catch (err) { console.error(err); setStatus('导出失败：' + (err && err.message ? err.message : err), 'err'); }
+  setStatus('正在生成导出文件（Excel + 走势图 PNG）…');
+  setTimeout(() => {
+    try {
+      const wl = DATA.week_label || 'export';
+      const files = [
+        {
+          name: '基金净值统计_' + wl + '.xlsx',
+          base64: XLSX.write(buildWorkbook(DATA), { bookType: 'xlsx', type: 'base64' }),
+          mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        },
+        { name: '基金净值走势图_' + wl + '.png', base64: chartsPngBase64(DATA), mime: 'image/png' },
+      ];
+      if (window.Android && window.Android.saveFiles) {
+        window.Android.saveFiles(JSON.stringify(files));
+      } else if (window.Android && window.Android.saveFile) {
+        files.forEach(f => window.Android.saveFile(f.name, f.base64, f.mime));
+      } else {
+        files.forEach(downloadFile);
+      }
+      setStatus('已生成 2 个文件：Excel 数据表 + 走势图 PNG，请在分享面板中选择保存', 'ok');
+    } catch (err) {
+      console.error(err);
+      setStatus('导出失败：' + (err && err.message ? err.message : err), 'err');
+    }
+  }, 30);
 };
 
 render();
