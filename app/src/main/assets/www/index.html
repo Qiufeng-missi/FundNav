@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#1f6feb" />
+    <title>基金净值统计</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="titles">
+          <h1>基金周净值统计软件</h1>
+          <div class="sub" id="subtitle">加载中…</div>
+        </div>
+        <div class="actions">
+          <button id="uploadBtn" class="btn btn-primary">📥 提供本周 PDF</button>
+          <button id="exportBtn" class="btn">💾 另存为 Excel</button>
+        </div>
+        <input type="file" id="fileInput" accept="application/pdf,.pdf" hidden />
+      </header>
+      <div id="status" class="status"></div>
+      <main id="panels"></main>
+      <div id="dropHint" class="drop-hint">拖拽 PDF 到此处松开即可导入</div>
+    </div>
+    <script src="lib/xlsx.full.min.js"></script>
+    <script src="lib/pdf.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

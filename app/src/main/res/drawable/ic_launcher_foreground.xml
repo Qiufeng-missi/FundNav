@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 柱状图（基金净值） -->
+    <path android:fillColor="#FFFFFF" android:pathData="M26,72 L40,72 L40,44 L26,44 Z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M44,72 L58,72 L58,30 L44,30 Z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M62,72 L76,72 L76,52 L62,52 Z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M80,72 L94,72 L94,38 L80,38 Z" />
+    <!-- 基线 -->
+    <path android:fillColor="#FFFFFF" android:pathData="M22,74 L94,74 L94,78 L22,78 Z" />
+</vector>

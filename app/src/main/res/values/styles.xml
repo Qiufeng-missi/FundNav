@@ -1,0 +1,6 @@
+<resources>
+    <style name="Theme.FundNav" parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:statusBarColor">@color/brand</item>
+        <item name="android:windowBackground">#F4F6F9</item>
+    </style>
+</resources>

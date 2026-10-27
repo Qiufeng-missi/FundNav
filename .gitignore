@@ -1,0 +1,14 @@
+# Android / Gradle
+*.apk
+*.aab
+.gradle/
+build/
+app/build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+google-services.json
+
+# Node (未使用，仅占位)
+node_modules/
