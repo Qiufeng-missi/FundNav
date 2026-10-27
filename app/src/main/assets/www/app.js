@@ -104,7 +104,7 @@ async function extractPdf(arrayBuffer, filename) {
   }
   const text = fullText.join('\n');
   const week = detectWeek(text, filename);
-  return { week, period, cats };
+  return { week, period, cats, text };
 }
 
 /* ===================== storage.js ===================== */
@@ -667,6 +667,22 @@ function downloadFile(f) {
   a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 800);
 }
+
+document.getElementById('diagBtn').onclick = () => {
+  if (!LAST_PARSE_TEXT) { setStatus('还没有解析过 PDF，请先「提供本周 PDF」导入一次', 'err'); return; }
+  try {
+    const f = {
+      name: 'PDF解析原文.txt',
+      base64: btoa(unescape(encodeURIComponent(LAST_PARSE_TEXT))),
+      mime: 'text/plain',
+    };
+    if (window.Android && window.Android.saveFile) window.Android.saveFile(f.name, f.base64, f.mime);
+    else downloadFile(f);
+    setStatus('已生成 PDF解析原文.txt，把它发给开发者即可排查解析问题', 'ok');
+  } catch (err) {
+    setStatus('导出原文失败：' + (err && err.message ? err.message : err), 'err');
+  }
+};
 
 document.getElementById('exportBtn').onclick = () => {
   if (!DATA || !DATA.weeks.length) { setStatus('暂无数据可导出', 'err'); return; }

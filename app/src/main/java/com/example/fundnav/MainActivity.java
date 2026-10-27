@@ -119,11 +119,10 @@ public class MainActivity extends Activity {
                 });
             }
         }
-    }
 
-    /** 供网页调用的原生能力：一次写出多个文件并整体分享（Excel + 走势图 PNG） */
-    @JavascriptInterface
-    public void saveFiles(final String payload) {
+        /** 供网页调用的原生能力：一次写出多个文件并整体分享（Excel + 走势图 PNG） */
+        @JavascriptInterface
+        public void saveFiles(final String payload) {
         try {
             org.json.JSONArray arr = new org.json.JSONArray(payload);
             File dir = new File(getCacheDir(), "shared");
@@ -167,6 +166,7 @@ public class MainActivity extends Activity {
                     Toast.makeText(MainActivity.this, "导出失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
                 }
             });
+        }
         }
     }
 
