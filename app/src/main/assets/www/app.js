@@ -12,21 +12,50 @@ var CAT_BENCH = {
 };
 
 function groupLines(textContent) {
-  const items = textContent.items.filter(it => typeof it.str === 'string');
+  const items = textContent.items.filter(it => typeof it.str === 'string' && it.str.trim() !== '');
   items.sort((a, b) => b.transform[5] - a.transform[5]);
   const lines = [];
   let curY = null, cur = [];
   for (const it of items) {
     const y = it.transform[5];
     if (curY === null || Math.abs(y - curY) > 2.5) {
-      if (cur.length) lines.push(cur.join(''));
+      if (cur.length) lines.push(cur);
       cur = [];
       curY = y;
     }
-    cur.push(it.str);
+    cur.push({ str: it.str, x: it.transform[4], w: it.width || 0 });
   }
-  if (cur.length) lines.push(cur.join(''));
+  if (cur.length) lines.push(cur);
+  for (const line of lines) line.sort((a, b) => a.x - b.x);
   return lines;
+}
+
+// 把一行内的 pdf.js 文本项按 x 坐标拼成带横坐标的 token（保留几何信息，用于左右分栏判断）
+function tokensFromItems(items) {
+  const toks = [];
+  for (const it of items) {
+    const s = it.str || '';
+    const n = s.length;
+    const cw = n > 0 ? (it.w / n) : 0;
+    const parts = s.split(/\s+/).filter(Boolean);
+    if (!parts.length) continue;
+    let idx = 0;
+    for (const p of parts) {
+      const at = s.indexOf(p, idx);
+      idx = at + p.length;
+      const x = it.x + at * cw;
+      const endX = x + p.length * cw;
+      const prev = toks[toks.length - 1];
+      // 相邻文本项间隙极小（<0.5pt，多为同一段文字被拆成多个 item）时合并
+      if (prev && (x - prev.endX) < 0.5 && (x - prev.endX) > -2) {
+        prev.text += p;
+        prev.endX = Math.max(prev.endX, endX);
+      } else {
+        toks.push({ text: p, x, endX });
+      }
+    }
+  }
+  return toks;
 }
 
 function isAum(tok) {
@@ -46,8 +75,8 @@ function catFromName(name) {
 
 function pct(s) {
   if (!s) return null;
-  let t = s.replace('%', '').replace('+', '').trim();
-  if (t === '' || t === '-' || t === '—') return null;
+  let t = s.replace(/%/g, '').replace(/％/g, '').replace(/\+/g, '').replace(/＋/g, '').trim();
+  if (t === '' || t === '-' || t === '—' || t === '–') return null;
   const v = parseFloat(t);
   return isNaN(v) ? null : v;
 }
@@ -72,52 +101,57 @@ async function extractPdf(arrayBuffer, filename) {
   let curCat = null;
   const fullText = [];
 
-  // 分类头（「XXX | 本周收益」）只在每个板块的首页出现，后续页是续页：
-  // curCat 跨页保持；遇到新板块扉页（业绩周刊/报告期）才清空。
-  // 注意：「平均值」汇总行是板块内部的子标题（如百亿/中小规模平均），不能清空 curCat，
-  // 否则它后面的基金整段被跳过 —— 这正是 1000指增 等大板块表尾出现空值的根因。
-  // 兜底：基金名自带「·1000指增」等后缀，即使分类上下文丢失也能反推归位（见 catFromName）。
+  // 版式（见用户提供的 PDF 截图）：每个板块占若干页，每页分左右两半——
+  // 左半 = 本周收益榜（名称 规模 本周收益 本周超额），右半 = 今年收益榜（同结构）。
+  // 两栏各自排名、行数不一致，行与行不一定对齐，因此不能按「一行 8 个 token 拆左右」猜测，
+  // 必须逐条目识别「基金名(含·) + 规模 + 1~2 个百分比」，并用基金名的横坐标判断它落在
+  // 页面左半（本周）还是右半（今年）—— 否则右栏基金的「今年收益」会被误写进「本周收益」。
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const tc = await page.getTextContent();
+    const mid = page.getViewport({ scale: 1 }).width / 2; // 左右分栏分界线
     const lines = groupLines(tc);
-    for (const line of lines) {
+    for (const items of lines) {
+      const toks = tokensFromItems(items);
+      const line = toks.map(t => t.text).join(' ');
       fullText.push(line);
       if (period === null) {
         const mp = line.match(/(\d{1,2})\.(\d{1,2})\s*-\s*(\d{1,2})\.(\d{2})/);
         if (mp) period = mp[1] + '.' + mp[2] + '-' + mp[3] + '.' + mp[4];
       }
       if (/业绩周刊|报告期/.test(line)) curCat = null;
-      const mc = line.match(/(量化\d+指增|量化对冲|量化选股|全天候)\s*\|\s*本周收益/);
+      const mc = line.match(/(量化\d+指增|量化对冲|量化选股|全天候)\s*\|\s*(本周收益|今年收益)/);
       if (mc) {
         curCat = mc[1];
         cats[curCat] = cats[curCat] || {};
         continue;
       }
-      if (curCat === null && !line.includes('·')) continue;
 
-      const toks = line.split(/\s+/).filter(Boolean);
-      let left, right;
-      if (toks.length >= 8) { left = toks.slice(0, 4); right = toks.slice(4, 8); }
-      else if (toks.length === 6) { left = toks.slice(0, 3); right = toks.slice(3, 6); }
-      else if (toks.length === 4) { left = toks.slice(0, 4); right = []; }
-      else continue;
-
-      const catL = (left.length >= 3 && left[0].includes('·') && isAum(left[1])) ? (curCat || catFromName(left[0])) : null;
-      const catR = (right.length >= 3 && right[0].includes('·') && isAum(right[1])) ? (curCat || catFromName(right[0])) : null;
-      if (!catL && !catR) continue;
-
-      if (catL) {
-        cats[catL] = cats[catL] || {};
-        const d = cats[catL][left[0]] = cats[catL][left[0]] || {};
-        const p1 = pct(left[2]); if (p1 !== null) d['当周'] = p1;
-        if (left.length > 3) { const e = pct(left[3]); if (e !== null) d['当周超额'] = e; }
-      }
-      if (catR) {
-        cats[catR] = cats[catR] || {};
-        const d = cats[catR][right[0]] = cats[catR][right[0]] || {};
-        const p2 = pct(right[2]); if (p2 !== null) d['今年'] = p2;
-        if (right.length > 3) { const e2 = pct(right[3]); if (e2 !== null) d['今年超额'] = e2; }
+      for (let i = 0; i < toks.length; i++) {
+        const name = toks[i].text;
+        if (!name.includes('·')) continue;
+        if (i + 1 >= toks.length || !isAum(toks[i + 1].text)) continue;
+        const vals = [];
+        let j = i + 2;
+        while (j < toks.length && vals.length < 2) {
+          const v = pct(toks[j].text);
+          if (v === null) break;
+          vals.push(v);
+          j++;
+        }
+        if (!vals.length) continue;
+        const cat = catFromName(name) || curCat; // 基金名后缀反推分类优先，上下文仅兜底
+        if (!cat) continue;
+        const d = cats[cat] = cats[cat] || {};
+        const rec = d[name] = d[name] || {};
+        if (toks[i].x >= mid) { // 右半页 = 今年榜
+          rec['今年'] = vals[0];
+          if (vals.length > 1) rec['今年超额'] = vals[1];
+        } else {                // 左半页 = 本周榜
+          rec['当周'] = vals[0];
+          if (vals.length > 1) rec['当周超额'] = vals[1];
+        }
+        i = j - 1;
       }
     }
   }
